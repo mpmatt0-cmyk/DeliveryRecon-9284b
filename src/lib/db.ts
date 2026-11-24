@@ -65,7 +65,9 @@ async function initDatabase(): Promise<DbClient> {
       // On Netlify serverless functions, use in-memory PGlite so concurrent invocations never collide on filesystem locks
       pglite = new PGlite();
     } else {
-      const dataDir = path.join(process.cwd(), '.data', 'pgdata');
+      // Use dynamic path segments so Next.js NFT bundler does not trace and package the local .data directory into serverless functions
+      const dirParts = ['.data', 'pgdata'];
+      const dataDir = path.resolve(...dirParts);
       fs.mkdirSync(path.dirname(dataDir), { recursive: true });
       pglite = new PGlite(dataDir);
     }
@@ -82,19 +84,9 @@ async function initDatabase(): Promise<DbClient> {
     };
   }
 
-  // Apply migrations in order idempotently
-  const migrationFiles = ['001_initial_schema.sql', '002_phase2_schema.sql'];
-  for (const file of migrationFiles) {
-    const migrationPath = path.join(process.cwd(), 'migrations', file);
-    if (fs.existsSync(migrationPath)) {
-      const migrationSql = fs.readFileSync(migrationPath, 'utf-8');
-      await client.exec(migrationSql);
-    } else if (file === '001_initial_schema.sql' && MIGRATION_001_SQL) {
-      await client.exec(MIGRATION_001_SQL);
-    } else if (file === '002_phase2_schema.sql' && MIGRATION_002_SQL) {
-      await client.exec(MIGRATION_002_SQL);
-    }
-  }
+  // Apply inlined SQL migrations idempotently without runtime fs reads
+  await client.exec(MIGRATION_001_SQL);
+  await client.exec(MIGRATION_002_SQL);
 
   return client;
 }
