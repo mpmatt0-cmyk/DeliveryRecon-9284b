@@ -2,6 +2,5 @@
   command = "npm run build"
   publish = ".next"
 
-[functions]
-  node_bundler = "nft"
-  included_files = ["node_modules/@electric-sql/pglite/dist/**"]
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
