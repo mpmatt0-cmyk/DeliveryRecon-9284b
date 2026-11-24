@@ -54,7 +54,13 @@ async function initDatabase(): Promise<DbClient> {
       },
     };
   } else {
-    const dataDir = path.join(process.cwd(), '.data', 'pgdata');
+    // Use /tmp on serverless environments (Netlify / AWS Lambda) where process.cwd() is read-only
+    const isServerless =
+      Boolean(process.env.NETLIFY) ||
+      Boolean(process.env.LAMBDA_TASK_ROOT) ||
+      Boolean(process.env.AWS_EXECUTION_ENV);
+    const baseDir = isServerless ? '/tmp' : process.cwd();
+    const dataDir = path.join(baseDir, '.data', 'pgdata');
     fs.mkdirSync(path.dirname(dataDir), { recursive: true });
     const pglite = new PGlite(dataDir);
     await pglite.waitReady;

@@ -11,6 +11,9 @@ build/
 # Local embedded PostgreSQL data
 .data/
 
+# Netlify local state
+.netlify/
+
 # Environment variables
 .env
 .env*.local
