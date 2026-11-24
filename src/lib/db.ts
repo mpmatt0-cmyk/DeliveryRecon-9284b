@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { Pool } from 'pg';
 import { PGlite } from '@electric-sql/pglite';
+import { MIGRATION_001_SQL, MIGRATION_002_SQL } from './migrations-sql';
 
 export interface QueryResult<T = Record<string, unknown>> {
   rows: T[];
@@ -54,15 +55,20 @@ async function initDatabase(): Promise<DbClient> {
       },
     };
   } else {
-    // Use /tmp on serverless environments (Netlify / AWS Lambda) where process.cwd() is read-only
     const isServerless =
       Boolean(process.env.NETLIFY) ||
       Boolean(process.env.LAMBDA_TASK_ROOT) ||
       Boolean(process.env.AWS_EXECUTION_ENV);
-    const baseDir = isServerless ? '/tmp' : process.cwd();
-    const dataDir = path.join(baseDir, '.data', 'pgdata');
-    fs.mkdirSync(path.dirname(dataDir), { recursive: true });
-    const pglite = new PGlite(dataDir);
+
+    let pglite: PGlite;
+    if (isServerless) {
+      // On Netlify serverless functions, use in-memory PGlite so concurrent invocations never collide on filesystem locks
+      pglite = new PGlite();
+    } else {
+      const dataDir = path.join(process.cwd(), '.data', 'pgdata');
+      fs.mkdirSync(path.dirname(dataDir), { recursive: true });
+      pglite = new PGlite(dataDir);
+    }
     await pglite.waitReady;
 
     client = {
@@ -83,6 +89,10 @@ async function initDatabase(): Promise<DbClient> {
     if (fs.existsSync(migrationPath)) {
       const migrationSql = fs.readFileSync(migrationPath, 'utf-8');
       await client.exec(migrationSql);
+    } else if (file === '001_initial_schema.sql' && MIGRATION_001_SQL) {
+      await client.exec(MIGRATION_001_SQL);
+    } else if (file === '002_phase2_schema.sql' && MIGRATION_002_SQL) {
+      await client.exec(MIGRATION_002_SQL);
     }
   }
 
