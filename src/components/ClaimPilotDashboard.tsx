@@ -98,36 +98,81 @@ export function ClaimPilotDashboard() {
     setLoading(true);
     try {
       let localCustomStores: StoreConfig[] = [];
+      let localCustomUploads: Array<{
+        id: string;
+        storeId: string;
+        storeConfig?: StoreConfig;
+        fileType: 'POS_EJ' | 'DOORDASH_CSV' | 'UBEREATS_CSV' | 'GRUBHUB_CSV';
+        filename: string;
+        content: string;
+      }> = [];
       try {
         const rawLocal = window.localStorage.getItem('claimpilot_custom_stores_v1');
         if (rawLocal) {
           localCustomStores = JSON.parse(rawLocal) as StoreConfig[];
         }
+        const rawUploads = window.localStorage.getItem('claimpilot_custom_uploads_v1');
+        if (rawUploads) {
+          localCustomUploads = JSON.parse(rawUploads);
+        }
       } catch {
         // ignore localStorage read errors
       }
 
-      const res = await fetch(`/api/claims?storeId=${encodeURIComponent(storeFilter)}`, {
+      if (localCustomStores.length > 0) {
+        setStores((prev) => {
+          const map = new Map<string, StoreConfig>();
+          for (const s of prev) map.set(s.pos_store_code.toUpperCase(), s);
+          for (const s of localCustomStores) map.set(s.pos_store_code.toUpperCase(), s);
+          return Array.from(map.values());
+        });
+      }
+
+      let res = await fetch(`/api/claims?storeId=${encodeURIComponent(storeFilter)}`, {
         cache: 'no-store',
       });
-      const data = await res.json();
+      let data = await res.json();
+
       if (data.stores) {
         const fetchedStores: StoreConfig[] = data.stores;
         const serverCodes = new Set(
           fetchedStores.map((s) => s.pos_store_code.toUpperCase())
         );
 
-        // Re-hydrate any locally saved custom stores that this serverless container doesn't have yet
+        // If this serverless container is cold and missing our custom stores, hydrate them synchronously
+        let didHydrateContainer = false;
         for (const custom of localCustomStores) {
           if (!serverCodes.has(custom.pos_store_code.toUpperCase())) {
-            fetch('/api/stores', {
+            await fetch('/api/stores', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(custom),
             }).catch(() => {});
+            didHydrateContainer = true;
           }
         }
 
+        // Also replay any custom uploads if this container was freshly spun up
+        if (didHydrateContainer && localCustomUploads.length > 0) {
+          for (const up of localCustomUploads) {
+            await fetch('/api/upload', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(up),
+            }).catch(() => {});
+          }
+        }
+
+        if (didHydrateContainer) {
+          res = await fetch(`/api/claims?storeId=${encodeURIComponent(storeFilter)}`, {
+            cache: 'no-store',
+          });
+          data = await res.json();
+        }
+      }
+
+      if (data.stores) {
+        const fetchedStores: StoreConfig[] = data.stores;
         setStores((prev) => {
           const map = new Map<string, StoreConfig>();
           for (const s of prev) map.set(s.pos_store_code.toUpperCase(), s);
@@ -274,6 +319,30 @@ export function ClaimPilotDashboard() {
       if (!res.ok) {
         showToast(`Error: ${data.error || 'Upload failed'}`);
       } else {
+        try {
+          const rawUploads = window.localStorage.getItem('claimpilot_custom_uploads_v1');
+          const list = rawUploads ? JSON.parse(rawUploads) : [];
+          const nextUploads = [
+            ...list.filter(
+              (u: { filename: string; storeId: string }) =>
+                !(u.filename === uploadFilename && u.storeId === uploadStoreId)
+            ),
+            {
+              id: `${uploadStoreId}_${uploadFilename}`,
+              storeId: uploadStoreId,
+              storeConfig: targetStoreConfig,
+              fileType: uploadFileType,
+              filename: uploadFilename,
+              content: uploadContent,
+            },
+          ].slice(-10);
+          window.localStorage.setItem(
+            'claimpilot_custom_uploads_v1',
+            JSON.stringify(nextUploads)
+          );
+        } catch {
+          // ignore localStorage write errors
+        }
         showToast(
           `Processed ${uploadFilename}: ${data.recordsParsed} valid record(s), ${data.claimsReconciled} claim(s) reconciled.`
         );

@@ -56,8 +56,8 @@ async function initDatabase(): Promise<DbClient> {
       },
     };
   } else {
-    // Use /tmp/.data/pgdata on serverless (Netlify / Lambda) so all route invocations inside the container
-    // share the same persistent database state; fall back to in-memory PGlite only if disk init fails.
+    // On serverless (Netlify / AWS Lambda), always use fast in-memory PGlite (50ms, immune to /tmp lock or 499 disconnect corruption).
+    // Cross-container & refresh persistence is handled by cloud-journal + client localStorage sync.
     const isServerless =
       Boolean(process.env.NETLIFY) ||
       Boolean(process.env.LAMBDA_TASK_ROOT) ||
@@ -66,17 +66,20 @@ async function initDatabase(): Promise<DbClient> {
       process.cwd().startsWith('/var/task');
 
     let pglite: PGlite;
-    try {
-      const dirParts = isServerless
-        ? ['/tmp', 'claimpilot_pgdata']
-        : ['.data', 'pgdata'];
-      const dataDir = path.resolve(...dirParts);
-      fs.mkdirSync(path.dirname(dataDir), { recursive: true });
-      pglite = new PGlite(dataDir);
-      await pglite.waitReady;
-    } catch {
+    if (isServerless) {
       pglite = new PGlite();
       await pglite.waitReady;
+    } else {
+      try {
+        const dirParts = ['.data', 'pgdata'];
+        const dataDir = path.resolve(...dirParts);
+        fs.mkdirSync(path.dirname(dataDir), { recursive: true });
+        pglite = new PGlite(dataDir);
+        await pglite.waitReady;
+      } catch {
+        pglite = new PGlite();
+        await pglite.waitReady;
+      }
     }
 
     client = {

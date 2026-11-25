@@ -59,7 +59,11 @@ export function Phase2AutomationPanel({
   }, [selectedStoreId]);
 
   useEffect(() => {
-    loadPhase2State();
+    // Stagger secondary Phase 2 fetch slightly after primary /api/claims call so serverless reuses 1 warm container
+    const timer = setTimeout(() => {
+      loadPhase2State();
+    }, 450);
+    return () => clearTimeout(timer);
   }, [loadPhase2State]);
 
   const handleSimulate2fa = async () => {
