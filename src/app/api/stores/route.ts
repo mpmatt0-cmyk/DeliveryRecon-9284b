@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createOrUpdateStore, listStores } from '@/lib/repository';
 
+export const dynamic = 'force-dynamic';
+
 export async function GET() {
   try {
     const stores = await listStores();

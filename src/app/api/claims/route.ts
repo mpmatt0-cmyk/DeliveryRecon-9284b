@@ -7,6 +7,8 @@ import {
 } from '@/lib/repository';
 import { ClaimStatus } from '@/lib/types';
 
+export const dynamic = 'force-dynamic';
+
 export async function GET(req: NextRequest) {
   try {
     const storeId = req.nextUrl.searchParams.get('storeId') ?? 'ALL';

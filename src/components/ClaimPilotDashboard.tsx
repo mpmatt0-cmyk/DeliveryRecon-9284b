@@ -97,13 +97,21 @@ export function ClaimPilotDashboard() {
   const fetchDashboardData = useCallback(async (storeFilter: string) => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/claims?storeId=${encodeURIComponent(storeFilter)}`);
+      const res = await fetch(`/api/claims?storeId=${encodeURIComponent(storeFilter)}`, {
+        cache: 'no-store',
+      });
       const data = await res.json();
       if (data.stores) {
-        setStores(data.stores);
-        if (data.stores.length > 0) {
+        const fetchedStores: StoreConfig[] = data.stores;
+        setStores((prev) => {
+          const map = new Map<string, StoreConfig>();
+          for (const s of prev) map.set(s.pos_store_code.toUpperCase(), s);
+          for (const s of fetchedStores) map.set(s.pos_store_code.toUpperCase(), s);
+          return Array.from(map.values());
+        });
+        if (fetchedStores.length > 0) {
           setUploadStoreId((prev) =>
-            prev && prev !== 'ALL' ? prev : data.stores[0].id
+            prev && prev !== 'ALL' ? prev : fetchedStores[0].id
           );
         }
       }
