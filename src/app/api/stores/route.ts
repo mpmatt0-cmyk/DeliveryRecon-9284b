@@ -18,9 +18,9 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const { name, pos_store_code, dd_merchant_store_id, iana_timezone, menu_markup_pct } = body;
 
-    if (!name || !pos_store_code || !dd_merchant_store_id || !iana_timezone) {
+    if (!name || !pos_store_code || !iana_timezone) {
       return NextResponse.json(
-        { error: 'Missing required store fields (name, pos_store_code, dd_merchant_store_id, iana_timezone)' },
+        { error: 'Missing required store fields (name, pos_store_code, iana_timezone)' },
         { status: 400 }
       );
     }
@@ -28,7 +28,7 @@ export async function POST(req: NextRequest) {
     const store = await createOrUpdateStore({
       name,
       pos_store_code,
-      dd_merchant_store_id,
+      dd_merchant_store_id: dd_merchant_store_id?.trim() || 'N/A',
       iana_timezone,
       menu_markup_pct: Number(menu_markup_pct ?? 0.15),
     });

@@ -299,18 +299,40 @@ export function ClaimPilotDashboard() {
       body: JSON.stringify({
         name: newStoreName,
         pos_store_code: newStoreCode,
-        dd_merchant_store_id: newStoreDdId,
+        dd_merchant_store_id: newStoreDdId.trim() || 'N/A',
         iana_timezone: newStoreTz,
         menu_markup_pct: markupPct,
       }),
     });
-    if (res.ok) {
-      showToast(`Saved store ${newStoreCode.toUpperCase()} with dedicated inbound ingestion address`);
+    const data = await res.json();
+    if (res.ok && data.store) {
+      const savedStore: StoreConfig = data.store;
+      setStores((prev) => {
+        const exists = prev.some(
+          (s) =>
+            s.id === savedStore.id ||
+            s.pos_store_code.toUpperCase() === savedStore.pos_store_code.toUpperCase()
+        );
+        return exists
+          ? prev.map((s) =>
+              s.id === savedStore.id ||
+              s.pos_store_code.toUpperCase() === savedStore.pos_store_code.toUpperCase()
+                ? savedStore
+                : s
+            )
+          : [...prev, savedStore];
+      });
+      setSelectedStoreId(savedStore.id);
+      setUploadStoreId(savedStore.id);
+      showToast(
+        `Saved store ${savedStore.pos_store_code} (${savedStore.inbound_email_address})`
+      );
       setNewStoreName('');
       setNewStoreCode('');
       setNewStoreDdId('');
       setShowStoreModal(false);
-      await fetchDashboardData(selectedStoreId);
+    } else {
+      showToast(`Error: ${data.error || 'Failed to save store'}`);
     }
   };
 
@@ -1346,13 +1368,12 @@ export function ClaimPilotDashboard() {
                 </div>
                 <div>
                   <label className="block text-[11px] text-slate-400 mb-1">
-                    DoorDash Merchant Store ID
+                    DoorDash Merchant Store ID (Optional)
                   </label>
                   <input
-                    required
                     value={newStoreDdId}
                     onChange={(e) => setNewStoreDdId(e.target.value)}
-                    placeholder="e.g. DD-M-992109"
+                    placeholder="Optional (defaults to N/A)"
                     className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-white"
                   />
                 </div>

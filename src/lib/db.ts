@@ -56,8 +56,8 @@ async function initDatabase(): Promise<DbClient> {
       },
     };
   } else {
-    // Use pure in-memory PGlite on serverless (Netlify / Lambda) or when local disk is unavailable;
-    // try local .data/pgdata for local dev, falling back to in-memory PGlite if WASM fs init fails.
+    // Use /tmp/.data/pgdata on serverless (Netlify / Lambda) so all route invocations inside the container
+    // share the same persistent database state; fall back to in-memory PGlite only if disk init fails.
     const isServerless =
       Boolean(process.env.NETLIFY) ||
       Boolean(process.env.LAMBDA_TASK_ROOT) ||
@@ -66,20 +66,17 @@ async function initDatabase(): Promise<DbClient> {
       process.cwd().startsWith('/var/task');
 
     let pglite: PGlite;
-    if (isServerless) {
+    try {
+      const dirParts = isServerless
+        ? ['/tmp', 'claimpilot_pgdata']
+        : ['.data', 'pgdata'];
+      const dataDir = path.resolve(...dirParts);
+      fs.mkdirSync(path.dirname(dataDir), { recursive: true });
+      pglite = new PGlite(dataDir);
+      await pglite.waitReady;
+    } catch {
       pglite = new PGlite();
       await pglite.waitReady;
-    } else {
-      try {
-        const dirParts = ['.data', 'pgdata'];
-        const dataDir = path.resolve(...dirParts);
-        fs.mkdirSync(path.dirname(dataDir), { recursive: true });
-        pglite = new PGlite(dataDir);
-        await pglite.waitReady;
-      } catch {
-        pglite = new PGlite();
-        await pglite.waitReady;
-      }
     }
 
     client = {
