@@ -60,7 +60,21 @@ export interface ClaimRowView {
   resolved_at: string | null;
 }
 
+const globalForSeed = globalThis as unknown as {
+  claimPilotSeedPromise?: Promise<void>;
+};
+
 export async function ensureSeeded(): Promise<void> {
+  if (!globalForSeed.claimPilotSeedPromise) {
+    globalForSeed.claimPilotSeedPromise = runSeedOnce().catch((err) => {
+      globalForSeed.claimPilotSeedPromise = undefined;
+      throw err;
+    });
+  }
+  return globalForSeed.claimPilotSeedPromise;
+}
+
+async function runSeedOnce(): Promise<void> {
   const db = await getDb();
   const countRes = await db.query<{ cnt: string | number }>(
     `SELECT COUNT(*) AS cnt FROM stores`
@@ -197,12 +211,21 @@ export async function ensureSeeded(): Promise<void> {
     `DD-3318COLD,${threeDaysAgoLocal.date} 21:15:00,,,$24.00,-$4.25,Food Quality Complaint,"1x Fries",Customer said fries were cold`,
   ].join('\n');
 
-  await ingestPosEjForStore('store_chi_104', 'CHI-104_nightly_ej.log', seedEjText, 'SEED_DEMO');
+  await ingestPosEjForStore(
+    'store_chi_104',
+    'CHI-104_nightly_ej.log',
+    seedEjText,
+    'SEED_DEMO',
+    undefined,
+    demoStores[0]
+  );
   await ingestDoorDashCsvForStore(
     'store_chi_104',
     'DoorDash_Payout_CHI-104.csv',
     seedDdCsv,
-    'SEED_DEMO'
+    'SEED_DEMO',
+    undefined,
+    demoStores[0]
   );
 
   // Mark one additional historical claim as WON ($36.80 verified recovered) so Verified Recovered KPI is live out of the box
@@ -213,7 +236,8 @@ export async function ensureSeeded(): Promise<void> {
       id, store_id, platform, external_order_id, normalized_order_id, order_suffix_4,
       order_created_at, dd_subtotal_cents, deduction_type, deduction_cents,
       dispute_deadline_at, customer_note, items_summary, item_fingerprint, raw_csv_row
-    ) VALUES ($1, $2, 'DOORDASH', 'DD-4401WON8', '4401WON8', 'WON8', $3, 3680, 'CANCELLED_AFTER_PREP', 3680, $4, 'Order cancelled after KDS bump', '2x Wings 10pc, 1x Fries', '["2x_10pc_wings","1x_fries"]'::jsonb, '{"order_id":"DD-4401WON8","status":"CREDITED"}'::jsonb)`,
+    ) VALUES ($1, $2, 'DOORDASH', 'DD-4401WON8', '4401WON8', 'WON8', $3, 3680, 'CANCELLED_AFTER_PREP', 3680, $4, 'Order cancelled after KDS bump', '2x Wings 10pc, 1x Fries', '["2x_10pc_wings","1x_fries"]'::jsonb, '{"order_id":"DD-4401WON8","status":"CREDITED"}'::jsonb)
+    ON CONFLICT (store_id, platform, external_order_id, deduction_type) DO NOTHING`,
     [
       wonOrderId,
       'store_chi_104',
@@ -227,7 +251,8 @@ export async function ensureSeeded(): Promise<void> {
       id, store_id, delivery_order_id, match_pass, match_confidence, dispute_score,
       status, score_breakdown, deduction_cents, verified_recovered_cents,
       rebuttal_text, evidence_packet_json, submitted_at, resolved_at
-    ) VALUES ($1, 'store_chi_104', $2, 'PASS_1_EXACT_REF', 100, 98, 'WON', $3::jsonb, 3680, 3680, $4, $5::jsonb, $6, $7)`,
+    ) VALUES ($1, 'store_chi_104', $2, 'PASS_1_EXACT_REF', 100, 98, 'WON', $3::jsonb, 3680, 3680, $4, $5::jsonb, $6, $7)
+    ON CONFLICT (delivery_order_id) DO NOTHING`,
     [
       wonClaimId,
       wonOrderId,
@@ -414,7 +439,8 @@ export async function ingestPosEjForStore(
   filename: string,
   rawText: string,
   sourceType: 'EMAIL_WEBHOOK' | 'MANUAL_UPLOAD' | 'SEED_DEMO',
-  emailMeta?: { sender?: string; recipient?: string }
+  emailMeta?: { sender?: string; recipient?: string },
+  preloadedStore?: StoreConfig
 ): Promise<{
   logId: string;
   recordsParsed: number;
@@ -422,7 +448,7 @@ export async function ingestPosEjForStore(
   claimsReconciled: number;
 }> {
   const db = await getDb();
-  const store = await getStoreById(storeId);
+  const store = preloadedStore ?? (await getStoreById(storeId));
   if (!store) throw new Error(`Store not found: ${storeId}`);
 
   const logId = makeId('ing');
@@ -489,7 +515,7 @@ export async function ingestPosEjForStore(
     );
   }
 
-  const claimsReconciled = await runStoreReconciliation(store.id);
+  const claimsReconciled = await runStoreReconciliation(store.id, store);
   await db.query(`UPDATE ingestion_logs SET claims_reconciled = $1 WHERE id = $2`, [
     claimsReconciled,
     logId,
@@ -512,7 +538,8 @@ export async function ingestDoorDashCsvForStore(
   filename: string,
   csvText: string,
   sourceType: 'EMAIL_WEBHOOK' | 'MANUAL_UPLOAD' | 'SEED_DEMO',
-  emailMeta?: { sender?: string; recipient?: string }
+  emailMeta?: { sender?: string; recipient?: string },
+  preloadedStore?: StoreConfig
 ) {
   return ingestPlatformCsvForStore(
     storeId,
@@ -520,7 +547,8 @@ export async function ingestDoorDashCsvForStore(
     filename,
     csvText,
     sourceType,
-    emailMeta
+    emailMeta,
+    preloadedStore
   );
 }
 
@@ -533,7 +561,8 @@ export async function ingestPlatformCsvForStore(
   filename: string,
   csvText: string,
   sourceType: 'EMAIL_WEBHOOK' | 'MANUAL_UPLOAD' | 'SEED_DEMO',
-  emailMeta?: { sender?: string; recipient?: string }
+  emailMeta?: { sender?: string; recipient?: string },
+  preloadedStore?: StoreConfig
 ): Promise<{
   logId: string;
   recordsParsed: number;
@@ -542,7 +571,7 @@ export async function ingestPlatformCsvForStore(
   reversalsApplied: number;
 }> {
   const db = await getDb();
-  const store = await getStoreById(storeId);
+  const store = preloadedStore ?? (await getStoreById(storeId));
   if (!store) throw new Error(`Store not found: ${storeId}`);
 
   const logId = makeId('ing');
@@ -623,7 +652,7 @@ export async function ingestPlatformCsvForStore(
     );
   }
 
-  const claimsReconciled = await runStoreReconciliation(store.id);
+  const claimsReconciled = await runStoreReconciliation(store.id, store);
 
   // Reconcile any REVERSAL_CREDIT rows against existing claims for verified payout recovery
   let reversalsApplied = 0;
@@ -669,9 +698,12 @@ export async function ingestPlatformCsvForStore(
  * Re-runs the 3-Pass Reconciliation Engine for a store's non-finalized orders while preserving
  * lifecycle states (`SUBMITTED`, `WON`, `LOST`) that an operator has already acted upon.
  */
-export async function runStoreReconciliation(storeId: string): Promise<number> {
+export async function runStoreReconciliation(
+  storeId: string,
+  preloadedStore?: StoreConfig
+): Promise<number> {
   const db = await getDb();
-  const store = await getStoreById(storeId);
+  const store = preloadedStore ?? (await getStoreById(storeId));
   if (!store) return 0;
 
   const ordersRes = await db.query<{

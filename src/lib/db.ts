@@ -13,9 +13,10 @@ export interface DbClient {
   exec(sql: string): Promise<void>;
 }
 
-// Global singleton so Next.js HMR does not re-open embedded Postgres instances
+// Global singletons so Next.js HMR and concurrent initial requests share one DB & one seed run
 const globalForDb = globalThis as unknown as {
   claimPilotDbPromise?: Promise<DbClient>;
+  claimPilotSeedPromise?: Promise<void>;
 };
 
 export async function getDb(): Promise<DbClient> {
@@ -55,23 +56,31 @@ async function initDatabase(): Promise<DbClient> {
       },
     };
   } else {
+    // Use pure in-memory PGlite on serverless (Netlify / Lambda) or when local disk is unavailable;
+    // try local .data/pgdata for local dev, falling back to in-memory PGlite if WASM fs init fails.
     const isServerless =
       Boolean(process.env.NETLIFY) ||
       Boolean(process.env.LAMBDA_TASK_ROOT) ||
-      Boolean(process.env.AWS_EXECUTION_ENV);
+      Boolean(process.env.AWS_EXECUTION_ENV) ||
+      Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME) ||
+      process.cwd().startsWith('/var/task');
 
     let pglite: PGlite;
     if (isServerless) {
-      // On Netlify serverless functions, use in-memory PGlite so concurrent invocations never collide on filesystem locks
       pglite = new PGlite();
+      await pglite.waitReady;
     } else {
-      // Use dynamic path segments so Next.js NFT bundler does not trace and package the local .data directory into serverless functions
-      const dirParts = ['.data', 'pgdata'];
-      const dataDir = path.resolve(...dirParts);
-      fs.mkdirSync(path.dirname(dataDir), { recursive: true });
-      pglite = new PGlite(dataDir);
+      try {
+        const dirParts = ['.data', 'pgdata'];
+        const dataDir = path.resolve(...dirParts);
+        fs.mkdirSync(path.dirname(dataDir), { recursive: true });
+        pglite = new PGlite(dataDir);
+        await pglite.waitReady;
+      } catch {
+        pglite = new PGlite();
+        await pglite.waitReady;
+      }
     }
-    await pglite.waitReady;
 
     client = {
       async query<T = Record<string, unknown>>(sql: string, params: unknown[] = []) {
