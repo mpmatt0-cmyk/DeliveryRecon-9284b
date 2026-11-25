@@ -1,5 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { ingestPlatformCsvForStore, ingestPosEjForStore } from '@/lib/repository';
+import {
+  createOrUpdateStore,
+  getStoreById,
+  ingestPlatformCsvForStore,
+  ingestPosEjForStore,
+} from '@/lib/repository';
+import { StoreConfig } from '@/lib/types';
 
 type UploadFileType = 'POS_EJ' | 'DOORDASH_CSV' | 'UBEREATS_CSV' | 'GRUBHUB_CSV';
 
@@ -35,8 +41,9 @@ function detectUploadType(filename: string, content: string): UploadFileType {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { storeId, fileType, filename, content } = body as {
+    const { storeId, storeConfig, fileType, filename, content } = body as {
       storeId: string;
+      storeConfig?: StoreConfig;
       fileType?: UploadFileType;
       filename: string;
       content: string;
@@ -49,12 +56,26 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    let resolvedStoreId = storeId;
+    const existingStore = await getStoreById(storeId);
+    if (!existingStore && storeConfig) {
+      const recreated = await createOrUpdateStore({
+        id: storeConfig.id,
+        name: storeConfig.name,
+        pos_store_code: storeConfig.pos_store_code,
+        dd_merchant_store_id: storeConfig.dd_merchant_store_id || 'N/A',
+        iana_timezone: storeConfig.iana_timezone,
+        menu_markup_pct: storeConfig.menu_markup_pct,
+      });
+      resolvedStoreId = recreated.id;
+    }
+
     const detectedType: UploadFileType =
       fileType ?? detectUploadType(filename || '', content);
 
     if (detectedType === 'POS_EJ') {
       const result = await ingestPosEjForStore(
-        storeId,
+        resolvedStoreId,
         filename || 'manual_pos_ej.log',
         content,
         'MANUAL_UPLOAD'
@@ -72,7 +93,7 @@ export async function POST(req: NextRequest) {
             : 'DOORDASH';
 
       const result = await ingestPlatformCsvForStore(
-        storeId,
+        resolvedStoreId,
         platform,
         filename || `manual_${platform.toLowerCase()}_payout.csv`,
         content,

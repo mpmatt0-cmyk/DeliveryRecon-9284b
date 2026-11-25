@@ -1,5 +1,10 @@
 import crypto from 'crypto';
 import { getDb } from './db';
+import {
+  readCloudJournal,
+  recordStoreInCloudJournal,
+  recordUploadInCloudJournal,
+} from './cloud-journal';
 import { parsePosElectronicJournal } from './parsers/pos-ej-parser';
 import { parseDoorDashPayoutCsv } from './parsers/doordash-csv-parser';
 import { parseUberEatsPayoutCsv } from './parsers/ubereats-csv-parser';
@@ -62,6 +67,7 @@ export interface ClaimRowView {
 
 const globalForSeed = globalThis as unknown as {
   claimPilotSeedPromise?: Promise<void>;
+  claimPilotAppliedUploads?: Set<string>;
 };
 
 export async function ensureSeeded(): Promise<void> {
@@ -71,7 +77,94 @@ export async function ensureSeeded(): Promise<void> {
       throw err;
     });
   }
-  return globalForSeed.claimPilotSeedPromise;
+  await globalForSeed.claimPilotSeedPromise;
+  await syncFromCloudJournal();
+}
+
+async function syncFromCloudJournal(): Promise<void> {
+  const journal = await readCloudJournal();
+  if (!journal) return;
+
+  const db = await getDb();
+  if (!globalForSeed.claimPilotAppliedUploads) {
+    globalForSeed.claimPilotAppliedUploads = new Set<string>();
+  }
+
+  for (const s of journal.stores) {
+    const code = s.pos_store_code.trim().toUpperCase();
+    const inboundEmail = `store-${code.toLowerCase()}@ingest.claimpilot.app`;
+    await db.query(
+      `INSERT INTO stores (id, name, pos_store_code, dd_merchant_store_id, iana_timezone, menu_markup_pct, inbound_email_address)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (pos_store_code) DO UPDATE SET
+         name = EXCLUDED.name,
+         dd_merchant_store_id = EXCLUDED.dd_merchant_store_id,
+         iana_timezone = EXCLUDED.iana_timezone,
+         menu_markup_pct = EXCLUDED.menu_markup_pct,
+         inbound_email_address = EXCLUDED.inbound_email_address`,
+      [
+        s.id,
+        s.name.trim(),
+        code,
+        s.dd_merchant_store_id.trim(),
+        s.iana_timezone.trim(),
+        s.menu_markup_pct,
+        inboundEmail,
+      ]
+    );
+  }
+
+  for (const u of journal.uploads) {
+    if (globalForSeed.claimPilotAppliedUploads.has(u.id)) continue;
+    globalForSeed.claimPilotAppliedUploads.add(u.id);
+
+    const storeRes = await db.query<{
+      id: string;
+      name: string;
+      pos_store_code: string;
+      dd_merchant_store_id: string;
+      iana_timezone: string;
+      menu_markup_pct: string | number;
+      inbound_email_address: string;
+    }>(`SELECT * FROM stores WHERE UPPER(pos_store_code) = $1 LIMIT 1`, [
+      u.store_pos_code.toUpperCase(),
+    ]);
+    if (storeRes.rows.length === 0) continue;
+    const rawStore = storeRes.rows[0];
+    const storeObj: StoreConfig = {
+      ...rawStore,
+      menu_markup_pct: Number(rawStore.menu_markup_pct),
+    };
+
+    if (u.fileType === 'POS_EJ') {
+      await ingestPosEjForStore(
+        storeObj.id,
+        u.filename,
+        u.content,
+        u.sourceType,
+        undefined,
+        storeObj,
+        true
+      );
+    } else {
+      const platform =
+        u.fileType === 'UBEREATS_CSV'
+          ? 'UBEREATS'
+          : u.fileType === 'GRUBHUB_CSV'
+            ? 'GRUBHUB'
+            : 'DOORDASH';
+      await ingestPlatformCsvForStore(
+        storeObj.id,
+        platform,
+        u.filename,
+        u.content,
+        u.sourceType,
+        undefined,
+        storeObj,
+        true
+      );
+    }
+  }
 }
 
 async function runSeedOnce(): Promise<void> {
@@ -426,7 +519,15 @@ export async function createOrUpdateStore(input: {
 
   const store = await getStoreByPosCodeOrEmail(code);
   if (!store) throw new Error('Failed to persist store configuration');
-  await runStoreReconciliation(store.id);
+  await recordStoreInCloudJournal({
+    id: store.id,
+    name: store.name,
+    pos_store_code: store.pos_store_code,
+    dd_merchant_store_id: store.dd_merchant_store_id,
+    iana_timezone: store.iana_timezone,
+    menu_markup_pct: store.menu_markup_pct,
+  });
+  await runStoreReconciliation(store.id, store);
   return store;
 }
 
@@ -440,7 +541,8 @@ export async function ingestPosEjForStore(
   rawText: string,
   sourceType: 'EMAIL_WEBHOOK' | 'MANUAL_UPLOAD' | 'SEED_DEMO',
   emailMeta?: { sender?: string; recipient?: string },
-  preloadedStore?: StoreConfig
+  preloadedStore?: StoreConfig,
+  skipJournalRecord = false
 ): Promise<{
   logId: string;
   recordsParsed: number;
@@ -452,6 +554,21 @@ export async function ingestPosEjForStore(
   if (!store) throw new Error(`Store not found: ${storeId}`);
 
   const logId = makeId('ing');
+  if (sourceType !== 'SEED_DEMO' && !skipJournalRecord) {
+    if (!globalForSeed.claimPilotAppliedUploads) {
+      globalForSeed.claimPilotAppliedUploads = new Set<string>();
+    }
+    globalForSeed.claimPilotAppliedUploads.add(logId);
+    await recordUploadInCloudJournal({
+      id: logId,
+      store_pos_code: store.pos_store_code,
+      fileType: 'POS_EJ',
+      filename,
+      content: rawText,
+      sourceType,
+      createdAt: new Date().toISOString(),
+    });
+  }
   const parsed = parsePosElectronicJournal(rawText, store.iana_timezone);
 
   await db.query(
@@ -562,7 +679,8 @@ export async function ingestPlatformCsvForStore(
   csvText: string,
   sourceType: 'EMAIL_WEBHOOK' | 'MANUAL_UPLOAD' | 'SEED_DEMO',
   emailMeta?: { sender?: string; recipient?: string },
-  preloadedStore?: StoreConfig
+  preloadedStore?: StoreConfig,
+  skipJournalRecord = false
 ): Promise<{
   logId: string;
   recordsParsed: number;
@@ -588,6 +706,22 @@ export async function ingestPlatformCsvForStore(
       : platform === 'GRUBHUB'
         ? 'GRUBHUB_CSV'
         : 'DOORDASH_CSV';
+
+  if (sourceType !== 'SEED_DEMO' && !skipJournalRecord) {
+    if (!globalForSeed.claimPilotAppliedUploads) {
+      globalForSeed.claimPilotAppliedUploads = new Set<string>();
+    }
+    globalForSeed.claimPilotAppliedUploads.add(logId);
+    await recordUploadInCloudJournal({
+      id: logId,
+      store_pos_code: store.pos_store_code,
+      fileType,
+      filename,
+      content: csvText,
+      sourceType,
+      createdAt: new Date().toISOString(),
+    });
+  }
 
   const totalParsed = parsed.deductionOrders.length + parsed.reversalCredits.length;
 

@@ -97,16 +97,42 @@ export function ClaimPilotDashboard() {
   const fetchDashboardData = useCallback(async (storeFilter: string) => {
     setLoading(true);
     try {
+      let localCustomStores: StoreConfig[] = [];
+      try {
+        const rawLocal = window.localStorage.getItem('claimpilot_custom_stores_v1');
+        if (rawLocal) {
+          localCustomStores = JSON.parse(rawLocal) as StoreConfig[];
+        }
+      } catch {
+        // ignore localStorage read errors
+      }
+
       const res = await fetch(`/api/claims?storeId=${encodeURIComponent(storeFilter)}`, {
         cache: 'no-store',
       });
       const data = await res.json();
       if (data.stores) {
         const fetchedStores: StoreConfig[] = data.stores;
+        const serverCodes = new Set(
+          fetchedStores.map((s) => s.pos_store_code.toUpperCase())
+        );
+
+        // Re-hydrate any locally saved custom stores that this serverless container doesn't have yet
+        for (const custom of localCustomStores) {
+          if (!serverCodes.has(custom.pos_store_code.toUpperCase())) {
+            fetch('/api/stores', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(custom),
+            }).catch(() => {});
+          }
+        }
+
         setStores((prev) => {
           const map = new Map<string, StoreConfig>();
           for (const s of prev) map.set(s.pos_store_code.toUpperCase(), s);
           for (const s of fetchedStores) map.set(s.pos_store_code.toUpperCase(), s);
+          for (const s of localCustomStores) map.set(s.pos_store_code.toUpperCase(), s);
           return Array.from(map.values());
         });
         if (fetchedStores.length > 0) {
@@ -232,11 +258,13 @@ export function ClaimPilotDashboard() {
     if (!uploadStoreId || !uploadContent.trim()) return;
     setUploading(true);
     try {
+      const targetStoreConfig = stores.find((s) => s.id === uploadStoreId);
       const res = await fetch('/api/upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           storeId: uploadStoreId,
+          storeConfig: targetStoreConfig,
           fileType: uploadFileType,
           filename: uploadFilename,
           content: uploadContent,
@@ -315,6 +343,22 @@ export function ClaimPilotDashboard() {
     const data = await res.json();
     if (res.ok && data.store) {
       const savedStore: StoreConfig = data.store;
+      try {
+        const rawLocal = window.localStorage.getItem('claimpilot_custom_stores_v1');
+        const list: StoreConfig[] = rawLocal ? JSON.parse(rawLocal) : [];
+        const nextList = list.filter(
+          (s) =>
+            s.pos_store_code.toUpperCase() !==
+            savedStore.pos_store_code.toUpperCase()
+        );
+        nextList.push(savedStore);
+        window.localStorage.setItem(
+          'claimpilot_custom_stores_v1',
+          JSON.stringify(nextList)
+        );
+      } catch {
+        // ignore localStorage write errors
+      }
       setStores((prev) => {
         const exists = prev.some(
           (s) =>
